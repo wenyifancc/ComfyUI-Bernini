@@ -1,4 +1,7 @@
-"""ComfyUI-Bernini custom node entry point."""
+"""ComfyUI-Bernini custom node entry point.
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+"""
 
 from .bernini.nodes.conditioning import BerniniConditioning, BerniniPlannerConditioning
 from .bernini.nodes.pipeline import PIPELINE_DISPLAY_NAMES, PIPELINE_NODE_MAPPINGS

@@ -162,7 +162,7 @@ ComfyUI-Bernini/
 │   ├── context_pipeline.py
 │   ├── encoders.py
 │   └── nodes/
-├── engine/                  # Bernini 专用推理引擎（Apache-2.0，改编自 WanVideoWrapper）
+├── engine/                  # Bernini 专用推理引擎（改编自 WanVideoWrapper，Apache-2.0）
 │   ├── bernini_core_nodes.py
 │   ├── wanvideo/
 │   ├── nodes_sampler.py
@@ -180,8 +180,9 @@ ComfyUI-Bernini/
 
 ## 许可证
 
-- `bernini/` — MIT
-- `engine/` — Apache-2.0
+本项目采用 [Apache License 2.0](LICENSE) 开源。
+
+`engine/` 推理引擎**改编自** [kijai/ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper)（同为 Apache-2.0）。详见[致谢](#致谢)。
 
 ---
 

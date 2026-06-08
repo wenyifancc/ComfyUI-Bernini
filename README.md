@@ -89,8 +89,9 @@ The `engine/` layer is **adapted from** [kijai/ComfyUI-WanVideoWrapper](https://
 
 ## License
 
-- `bernini/` — MIT
-- `engine/` — Apache-2.0
+This project is licensed under the [Apache License, Version 2.0](LICENSE).
+
+The `engine/` layer is **adapted from** [kijai/ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) (also Apache-2.0). See [Acknowledgements](#acknowledgements).
 
 ---
 
