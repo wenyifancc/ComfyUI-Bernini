@@ -368,7 +368,7 @@ def build_gen_director_plan(
                 len(seg_refs),
             )
         seg_refs = segment_refs_for_context(seg_task_key, seg_refs)
-        seg_source = source_clips[idx].clone() if attach_source_clips and idx < len(source_clips) else None
+        seg_source = source_clips[idx].clone() if idx < len(source_clips) else None
 
         segments.append(
             SegmentPlan(

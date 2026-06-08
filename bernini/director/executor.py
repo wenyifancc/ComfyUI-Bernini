@@ -29,9 +29,29 @@ def _needs_source_video(task_key: str) -> bool:
     return task_key in {"v2v", "rv2v", "vi2v", "vrc2v", "mv2v", "ads2v", "i2v", "i2i"}
 
 
+def _is_gen_timeline_plan(plan: DirectorPlan) -> bool:
+    mode = str((plan.raw or {}).get("timelineMode") or "").lower()
+    return mode in ("gen_blank", "gen_image", "prompt_batch", "image_batch")
+
+
+def _resolve_segment_raw_clip(plan: DirectorPlan, seg) -> torch.Tensor:
+    """Prefer in-memory gen canvas / segment clip; fall back to timeline video decode."""
+    if seg.source_clip is not None and seg.source_clip.shape[0] > 0:
+        return seg.source_clip.clone()
+
+    sv = plan.source_video
+    if _is_gen_timeline_plan(plan) and sv is not None and int(sv.shape[0]) > 0:
+        start = max(0, int(seg.start_frame))
+        end = min(int(seg.end_frame), int(sv.shape[0]))
+        if end > start:
+            return sv[start:end].clone()
+
+    return load_timeline_segment(plan.raw, seg.start_frame, seg.end_frame)
+
+
 def _source_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor:
     """Scaled source frames for skipped v2v segments with no generation cache yet."""
-    raw_clip = load_timeline_segment(plan.raw, seg.start_frame, seg.end_frame)
+    raw_clip = _resolve_segment_raw_clip(plan, seg)
     target_len = raw_clip.shape[0]
     if plan.output_mode == "fixed":
         clip = fit_canvas(raw_clip, plan.width, plan.height)
@@ -156,9 +176,7 @@ def execute_director_plan(
             **meta,
         )
 
-        raw_clip = seg.source_clip.clone() if seg.source_clip is not None else load_timeline_segment(
-            plan.raw, seg.start_frame, seg.end_frame
-        )
+        raw_clip = _resolve_segment_raw_clip(plan, seg)
         target_len = raw_clip.shape[0]
         if seg.source_clip is not None:
             clip = raw_clip
