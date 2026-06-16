@@ -24,6 +24,11 @@ from .plan import (
 )
 from .segment_cache import load_segment_cache, save_segment_cache
 from .vram_cleanup import cleanup_segment_vram
+from .prompt_enhance_runtime import (
+    PromptEnhanceSettings,
+    maybe_enhance_segment_prompt,
+    notify_prompt_enhanced,
+)
 from .progress import report_director_finish, report_director_progress, report_director_segment_preview
 
 log = logging.getLogger("ComfyUI-Bernini.director")
@@ -135,8 +140,10 @@ def execute_director_plan(
     tiled_vae: bool = False,
     vae_force_offload: bool = True,
     clear_vram_between_segments: bool = True,
+    prompt_enhance: PromptEnhanceSettings | None = None,
 ) -> tuple[torch.Tensor, list[torch.Tensor], str]:
     """Process every segment; return combined frames, per-segment frames, and report."""
+    pe = prompt_enhance or PromptEnhanceSettings()
     from .extra_args import merge_sampler_extra_args
 
     high_extra = merge_sampler_extra_args(high_noise_extra_args, enable_teacache=enable_teacache)
@@ -216,6 +223,25 @@ def execute_director_plan(
 
         positive = seg.prompt
         seg_negative = (seg.negative_prompt or "").strip() or negative_prompt
+        ref_video_pe = reference_video_for_segment(plan, seg, num_frames)
+        source_pe = clip if _needs_source_video(seg.task_key) else None
+        if pe.active:
+            original = positive
+            positive = maybe_enhance_segment_prompt(
+                pe,
+                task_type=seg.task_type,
+                user_prompt=positive,
+                source_clip=source_pe,
+                refs=seg.refs,
+                reference_video=ref_video_pe,
+            )
+            if positive != original:
+                notify_prompt_enhanced(
+                    node_id,
+                    text=positive,
+                    segment_index=seg.index,
+                    field="segment" if not seg.use_global else "global",
+                )
         report_director_progress(
             node_id,
             segment_index=progress_index,

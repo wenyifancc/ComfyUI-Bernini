@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from ..director.executor import execute_director_plan
+from ..director.prompt_enhance_runtime import PromptEnhanceSettings
 from .director_common import (
+    director_llm_enhance_inputs,
     director_perf_inputs,
     finalize_director_outputs,
     prepare_director_plan,
@@ -148,6 +150,7 @@ class BerniniDirector:
                     {"default": False, "tooltip": "Tiled VAE during context encode (not decode)."},
                 ),
                 "vae_force_offload": ("BOOLEAN", {"default": True, "tooltip": "Offload VAE after context encode."}),
+                **director_llm_enhance_inputs(),
                 **director_perf_inputs(),
                 "enable_teacache": (
                     "BOOLEAN",
@@ -216,10 +219,30 @@ class BerniniDirector:
         clear_vram_between_segments=True,
         export_source_images=False,
         enable_teacache=False,
+        llm_auto_enhance=False,
+        llm_api_format="Ollama",
+        llm_url="http://127.0.0.1:11434/v1",
+        llm_api_key="",
+        llm_model="qwen3.5",
+        llm_output_language="中文",
+        llm_character_feature_enhance=False,
+        llm_unload_after=False,
+        llm_custom_template="",
         **kwargs,
     ):
         del kwargs  # bd_grp_* section headers — UI only
         t5 = resolve_t5_config(t5_config)
+        prompt_enhance = PromptEnhanceSettings.from_node(
+            llm_auto_enhance=llm_auto_enhance,
+            llm_api_format=llm_api_format,
+            llm_url=llm_url,
+            llm_api_key=llm_api_key,
+            llm_model=llm_model,
+            llm_output_language=llm_output_language,
+            llm_character_feature_enhance=llm_character_feature_enhance,
+            llm_unload_after=llm_unload_after,
+            llm_custom_template=llm_custom_template,
+        )
 
         plan = prepare_director_plan(
             timeline_data=timeline_data,
@@ -267,6 +290,7 @@ class BerniniDirector:
             tiled_vae=tiled_vae,
             vae_force_offload=vae_force_offload,
             clear_vram_between_segments=clear_vram_between_segments,
+            prompt_enhance=prompt_enhance,
         )
 
         return finalize_director_outputs(

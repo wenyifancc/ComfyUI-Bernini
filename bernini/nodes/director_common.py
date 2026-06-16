@@ -88,6 +88,97 @@ def timeline_required_inputs() -> dict:
     }
 
 
+def director_llm_enhance_inputs() -> dict:
+    """LLM prompt enhancement widgets (Bernini official templates + Ollama/vLLM)."""
+    return {
+        "bd_grp_pe": ("BDGROUP", {"default": "提示词增强 LLM Prompt Enhancer"}),
+        "llm_auto_enhance": (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": (
+                    "每次 Queue 时自动用 LLM 扩写当前片段/全局正向提示词（使用 Bernini 官方 task 模板）。"
+                    "Auto-enhance 会在服务端附带源视频帧与参考图（若已上传）。"
+                ),
+            },
+        ),
+        "llm_api_format": (
+            ["Ollama", "智谱 GLM"],
+            {
+                "default": "Ollama",
+                "tooltip": (
+                    "Ollama 原生：/api/chat；"
+                    "智谱 GLM：https://open.bigmodel.cn/api/paas/v4/chat/completions。"
+                ),
+            },
+        ),
+        "llm_url": (
+            "STRING",
+            {
+                "default": "http://127.0.0.1:11434/v1",
+                "tooltip": (
+                    "LLM 服务地址。Ollama：http://127.0.0.1:11434/v1；"
+                    "智谱：https://open.bigmodel.cn/api/paas/v4。"
+                ),
+            },
+        ),
+        "llm_api_key": (
+            "STRING",
+            {
+                "default": "",
+                "tooltip": "智谱 API Key（Bearer）。也可设环境变量 ZHIPU_API_KEY / BERNINI_PE_API_KEY。",
+            },
+        ),
+        "llm_model": (
+            "STRING",
+            {
+                "default": "qwen3.5",
+                "tooltip": (
+                    "模型名称。Ollama 默认 qwen3.5。"
+                    "智谱默认 glm-4.6v-flash（支持参考图/视频帧 Base64）；"
+                    "纯文本可选用 glm-4-flash-250414。"
+                ),
+            },
+        ),
+        "llm_output_language": (
+            ["English", "中文"],
+            {
+                "default": "中文",
+                "tooltip": (
+                    "LLM 扩写结果的输出语言。官方 Bernini 示例与 T5 系统提示词为英文；"
+                    "选「中文」时扩写内容为简体中文，送入模型时仍会前置英文 task 系统提示词。"
+                ),
+            },
+        ),
+        "llm_character_feature_enhance": (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": (
+                    "角色特征增强（rv2v/r2v/r2i 等含参考图任务，默认关闭）。"
+                    "未勾选时按 Bernini 官方提示词工程扩写；"
+                    "勾选后追加详尽角色外观指令（总汉字≥300，充分描述参考图人物特征）。"
+                ),
+            },
+        ),
+        "llm_unload_after": (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": "增强完成后立即卸载 Ollama 模型（keep_alive=0，仅 Ollama）。",
+            },
+        ),
+        "llm_custom_template": (
+            "STRING",
+            {
+                "default": "",
+                "multiline": True,
+                "tooltip": "可选：覆盖当前 task_type 的 LLM 扩写模板（留空则用官方模板）。",
+            },
+        ),
+    }
+
+
 def director_perf_inputs() -> dict:
     """Performance widgets shared by Bernini Director nodes."""
     return {
@@ -248,6 +339,35 @@ def build_source_images_output(
     return [pad_or_trim_frames(fitted, target_len).cpu().float()]
 
 
+def _empty_source_images_for(images_out: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Neutral 1-frame placeholders when source export is off (OUTPUT_IS_LIST + downstream nodes need batch>=1)."""
+    if not images_out:
+        return [torch.full((1, 1, 1, 3), 0.5)]
+    placeholders: list[torch.Tensor] = []
+    for img in images_out:
+        if isinstance(img, torch.Tensor) and img.ndim == 4:
+            h, w, c = int(img.shape[1]), int(img.shape[2]), int(img.shape[3])
+        else:
+            h, w, c = 1, 1, 3
+        placeholders.append(torch.full((1, h, w, c), 0.5))
+    return placeholders
+
+
+def _ensure_nonempty_image_batches(images_out: list[torch.Tensor], *, label: str) -> list[torch.Tensor]:
+    """Drop or pad zero-frame tensors so IMAGE list outputs never break downstream nodes."""
+    fixed: list[torch.Tensor] = []
+    for i, img in enumerate(images_out):
+        if not isinstance(img, torch.Tensor) or img.ndim != 4:
+            raise ValueError(f"Director {label}[{i}] is not a valid IMAGE tensor.")
+        if int(img.shape[0]) <= 0:
+            h, w, c = int(img.shape[1]), int(img.shape[2]), int(img.shape[3])
+            log.warning("Director %s[%d] has 0 frames; emitting 1-frame placeholder.", label, i)
+            fixed.append(torch.full((1, max(1, h), max(1, w), max(1, c)), 0.5))
+        else:
+            fixed.append(img)
+    return fixed
+
+
 def finalize_director_outputs(
     plan,
     combined,
@@ -323,7 +443,10 @@ def finalize_director_outputs(
             source_images_out = images_out
             report = report + f"\n\nSource images: fallback to generated output ({exc})."
     else:
-        source_images_out = []
+        source_images_out = _empty_source_images_for(images_out)
+
+    images_out = _ensure_nonempty_image_batches(images_out, label="images")
+    source_images_out = _ensure_nonempty_image_batches(source_images_out, label="source_images")
 
     fps_out = float(plan.frame_rate or 24.0)
     return images_out, audio_out, frame_count, report, source_images_out, fps_out

@@ -27,6 +27,12 @@ import {
     setToolbarDisabledForBatch,
     wireBatchRunSelectControls,
 } from "./bernini_image_batch.js";
+import {
+    getPromptEnhancerPanelHeight,
+    mountPromptEnhancerPanel,
+    registerDirectorPromptEnhancerEvents,
+} from "./bernini_prompt_enhancer.js";
+import { mountPromptImageMentions } from "./bernini_prompt_mentions.js";
 
 const RULER_H = 24;
 const TRACK_H = 160;
@@ -44,6 +50,8 @@ const BERNINI_CHUNK_SIZE = 8 * 1024 * 1024;
 const HIDDEN_WIDGETS = [
     "timeline_data", "total_frames", "width", "height", "ref_max_size",
     "task_type", "global_prompt", "frame_rate", "negative_prompt",
+    "bd_grp_pe", "llm_auto_enhance", "llm_api_format", "llm_url", "llm_api_key", "llm_model",
+    "llm_unload_after", "llm_output_language", "llm_character_feature_enhance", "llm_custom_template",
 ];
 
 const DIRECTOR_WIDGET_LABELS = {
@@ -159,6 +167,7 @@ const STYLES = `
 .bd-icon-btn.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
 .bd-seek{flex:1;min-width:120px;height:6px}
 .bd-panel{width:100%;box-sizing:border-box;background:#222;border:1px solid #111;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px}
+.bd-pe-host{width:100%;box-sizing:border-box;margin-top:8px;flex-shrink:0}
 .bd-prompt-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(110px,38%);gap:8px;align-items:stretch}
 .bd-prompt-col{display:flex;flex-direction:column;gap:5px;min-width:0}
 .bd-prompt-col .bd-label,.bd-refs-col .bd-label{color:#888;font-size:10px;line-height:1.2;flex-shrink:0}
@@ -384,10 +393,11 @@ function buildClipFrameMap(clipIndex, count) {
 const CLIP_SEGMENT_COLORS = ["rgba(255,200,50,0.9)", "rgba(102,170,255,0.9)", "rgba(79,255,143,0.9)", "rgba(255,102,170,0.9)"];
 
 function getDirectorUiHeight(editor) {
+    const peH = getPromptEnhancerPanelHeight(editor);
     if (editor?.getDirectorMode?.() === "prompt_batch") {
-        return getImageBatchUiHeight(editor) + 140;
+        return getImageBatchUiHeight(editor) + 140 + peH;
     }
-    return (editor?.canvasHeight || RULER_H + TRACK_H) + 370 + 52;
+    return (editor?.canvasHeight || RULER_H + TRACK_H) + 370 + 52 + peH;
 }
 
 function hookTaskTypeWidget(node) {
@@ -1012,7 +1022,7 @@ class BerniniDirectorEditor {
                 <div class="bd-prompt-layout">
                     <div class="bd-prompt-col">
                         <span class="bd-label">正向提示词</span>
-                        <textarea class="bd-prompt" data-r="global-prompt" placeholder="全局提示词 — 全局模式下所有片段使用"></textarea>
+                        <textarea class="bd-prompt" data-r="global-prompt" placeholder="全局提示词 — 输入 @ 选择参考图"></textarea>
                         <span class="bd-label">反向提示词</span>
                         <textarea class="bd-prompt bd-prompt-negative" data-r="global-negative" placeholder="反向提示词 — 所有片段共用"></textarea>
                     </div>
@@ -1044,7 +1054,7 @@ class BerniniDirectorEditor {
                 <div class="bd-prompt-layout">
                     <div class="bd-prompt-col">
                         <span class="bd-label">正向提示词</span>
-                        <textarea class="bd-prompt" data-r="seg-prompt" placeholder="该片段的提示词"></textarea>
+                        <textarea class="bd-prompt" data-r="seg-prompt" placeholder="该片段的提示词 — 输入 @ 选择参考图"></textarea>
                         <span class="bd-label">反向提示词</span>
                         <textarea class="bd-prompt bd-prompt-negative" data-r="seg-negative" placeholder="反向提示词 — 所有片段共用"></textarea>
                     </div>
@@ -1075,6 +1085,13 @@ class BerniniDirectorEditor {
         this.batchI2vNotice = batchUi.i2vNotice;
         this.batchAddBtn = batchUi.addBtn;
         wireBatchRunSelectControls(this, batchUi);
+
+        // PE 始终紧跟在所有提示词区域之后（视频/生成 .bd-split，批量 t2i/i2i/i2v 等 .bd-batch）
+        const peHost = document.createElement("div");
+        peHost.className = "bd-pe-host";
+        this.mainBody.appendChild(peHost);
+        this.peHost = peHost;
+        mountPromptEnhancerPanel(this, peHost);
 
         const runStatus = document.createElement("div");
         runStatus.className = "bd-run-status idle";
@@ -1225,6 +1242,8 @@ class BerniniDirectorEditor {
         this.segPrompt.oninput = () => this.onSegField("prompt", this.segPrompt.value);
         this.globalNegative.oninput = () => this.onNegativePrompt(this.globalNegative.value);
         this.segNegative.oninput = () => this.onNegativePrompt(this.segNegative.value);
+
+        mountPromptImageMentions(this);
 
         this.outMode.onchange = () => this.onOutputField("mode", this.outMode.value);
         this.outLong.onchange = () => this.onOutputField("longEdge", +this.outLong.value);
@@ -1561,6 +1580,7 @@ class BerniniDirectorEditor {
 
     onTaskTypeChanged(value) {
         this.onGlobalField("taskType", value);
+        this._promptEnhancer?.onTaskTypeChanged?.();
     }
 
     ensureGenTimeline() {
@@ -2685,6 +2705,7 @@ class BerniniDirectorEditor {
     }
 
     commit(skipRender = false, { syncTimeline = true } = {}) {
+        this._promptEnhancer?.syncToWidgets?.();
         this.syncFromWidgets();
         this.normalizeSegments();
         if (this.isRunSelectEnabled()) this.normalizeRunSelection();
@@ -4050,7 +4071,7 @@ class BerniniDirectorEditor {
             const ref = (refs || []).find((r) => Number(r.index ?? r.slot) === i);
             const tag = document.createElement("span");
             tag.className = "bd-ref-tag";
-            tag.textContent = `img${i}`;
+            tag.textContent = `image${i}`;
             el.appendChild(tag);
             if (ref?.imageFile) {
                 el.classList.add("has-img");
@@ -4393,6 +4414,7 @@ app.registerExtension({
         const flushDirectors = () => {
             const graph = app.graph ?? app.canvas?.graph;
             for (const node of graph?._nodes ?? graph?.nodes ?? []) {
+                node._berniniEditor?._promptEnhancer?.syncToWidgets?.();
                 node._berniniEditor?.flushTimelineSync?.();
             }
         };
@@ -4461,6 +4483,8 @@ app.registerExtension({
             }
         });
 
+        registerDirectorPromptEnhancerEvents(findDirectorNode);
+
         patchDirectorDomWidgetLayout();
         setTimeout(patchDirectorDomWidgetLayout, 500);
     },
@@ -4472,6 +4496,10 @@ app.registerExtension({
             bindDirectorDomWidgetSizing(node, node._directorDomWidget, () => node._berniniEditor);
             initDirectorEditor(node);
             node._berniniEditor?.scheduleRender?.();
+            setTimeout(() => {
+                node._berniniEditor?._promptEnhancer?.syncFromWidgets?.();
+                node._berniniEditor?._promptEnhancer?.fetchTemplate?.(true);
+            }, 120);
         }
     },
     async getCustomWidgets() {
@@ -4584,6 +4612,8 @@ app.registerExtension({
                 ed.selectedIndex = 0;
                 ed.updateSelectionUI();
                 ed.commit(true, { syncTimeline: false });
+                ed._promptEnhancer?.syncFromWidgets?.();
+                ed._promptEnhancer?.fetchTemplate?.(true);
             }, 80);
             return out;
         };

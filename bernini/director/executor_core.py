@@ -10,6 +10,11 @@ from ..image_prep import fit_canvas, fit_video_long_edge, cat_frames_variable_si
 from ..nodes.conditioning import _run_conditioning
 from .core_sampling import apply_apg, apply_model_sampling_shift, sample_dual_stage
 from .core_text_encode import encode_core_conditioning
+from .prompt_enhance_runtime import (
+    PromptEnhanceSettings,
+    maybe_enhance_segment_prompt,
+    notify_prompt_enhanced,
+)
 from .executor import (
     _frames_label,
     _is_gen_timeline_plan,
@@ -56,8 +61,10 @@ def execute_director_plan_core(
     apg_momentum: float = 0.0,
     apg_norm_threshold: float = 0.0,
     clear_vram_between_segments: bool = True,
+    prompt_enhance: PromptEnhanceSettings | None = None,
 ) -> tuple[torch.Tensor, list[torch.Tensor], str]:
     """Process every segment with ComfyUI core Bernini conditioning + KSampler."""
+    pe = prompt_enhance or PromptEnhanceSettings()
     from nodes import VAEDecode
 
     decoder = VAEDecode()
@@ -140,6 +147,25 @@ def execute_director_plan_core(
 
         positive_prompt = seg.prompt
         seg_negative = (seg.negative_prompt or "").strip() or negative_prompt
+        ref_video_pe = reference_video_for_segment(plan, seg, num_frames)
+        source_pe = clip_frames if _needs_source_video(seg.task_key) else None
+        if pe.active:
+            original = positive_prompt
+            positive_prompt = maybe_enhance_segment_prompt(
+                pe,
+                task_type=seg.task_type,
+                user_prompt=positive_prompt,
+                source_clip=source_pe,
+                refs=seg.refs,
+                reference_video=ref_video_pe,
+            )
+            if positive_prompt != original:
+                notify_prompt_enhanced(
+                    node_id,
+                    text=positive_prompt,
+                    segment_index=seg.index,
+                    field="segment" if not seg.use_global else "global",
+                )
 
         report_director_progress(
             node_id,

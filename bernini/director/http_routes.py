@@ -143,6 +143,9 @@ def register_routes() -> bool:
     _register_route(routes, "POST", "/bernini/director/upload_chunk", bernini_upload_video_chunk)
     _register_route(routes, "POST", "/bernini/director/probe_video", bernini_probe_video)
     _register_route(routes, "GET", "/bernini/director/probe_video", bernini_probe_video)
+    from .prompt_enhance_routes import register_prompt_enhance_routes
+
+    register_prompt_enhance_routes(routes, _register_route)
     _ROUTES_REGISTERED = True
     log.info("Bernini Director HTTP routes registered")
     return True
