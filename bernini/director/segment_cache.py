@@ -41,6 +41,8 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         "refs": ref_files,
         "ref_video": ref_video_file,
         "ref_video_start": seg.reference_video_start_frame,
+        "continuity": plan.continuity_enabled,
+        "continuity_overlap": plan.continuity_overlap_frames if plan.continuity_enabled else 0,
     }
 
 

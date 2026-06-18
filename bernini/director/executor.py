@@ -23,6 +23,15 @@ from .plan import (
     wan_align_frame_count,
 )
 from .segment_cache import load_segment_cache, save_segment_cache
+from .segment_continuity import (
+    apply_cached_segment_continuity,
+    apply_scail_continuity,
+    concat_continuous_chunks,
+    resolve_continuity_guide_frames,
+    resolve_prev_segment_output,
+    match_opening_appearance_colors,
+    soft_blend_segment_opening,
+)
 from .vram_cleanup import cleanup_segment_vram
 from .prompt_enhance_runtime import (
     PromptEnhanceSettings,
@@ -179,6 +188,13 @@ def execute_director_plan(
                 "v2v/i2v segments without cache fall back to source video for merge."
             )
 
+    completed_outputs: dict[int, torch.Tensor] = {}
+
+    if plan.continuity_enabled:
+        reports.append(
+            "Segment continuity: light gen guide (motion ctx + 1f ref); plain concat export"
+        )
+
     def _run_one_segment(seg, *, progress_index: int) -> torch.Tensor:
         meta = {
             "frames_label": _frames_label(seg),
@@ -304,6 +320,26 @@ def execute_director_plan(
             force_offload=vae_force_offload,
             **ref_kwargs,
         )
+        prev_tail_output = None
+        if plan.continuity_enabled:
+            prev_tail_output = resolve_prev_segment_output(
+                plan, all_segments, seg.index, completed_outputs, node_id
+            )
+            _, image_embeds, _, continuity_note = apply_scail_continuity(
+                plan=plan,
+                seg=seg,
+                prev_output=prev_tail_output,
+                vae=vae,
+                width=ctx_w,
+                height=ctx_h,
+                ref_max_size=plan.ref_max_size,
+                target_shape=tuple(image_embeds["target_shape"]),
+                image_embeds=image_embeds,
+                tiled_vae=tiled_vae,
+                force_offload=vae_force_offload,
+            )
+            if continuity_note:
+                reports.append(continuity_note)
         report_director_progress(
             node_id,
             segment_index=progress_index,
@@ -336,6 +372,7 @@ def execute_director_plan(
             seed=high_noise_seed,
             force_offload=high_noise_force_offload,
             add_noise_to_samples=high_noise_add_noise_to_samples,
+            samples=None,
             extra_args=high_extra,
         )
         report_director_progress(
@@ -414,8 +451,35 @@ def execute_director_plan(
             pad = decoded[-1:].repeat(target_len - decoded.shape[0], 1, 1, 1)
             decoded = torch.cat([decoded, pad], dim=0)
 
+        if (
+            plan.continuity_enabled
+            and seg.index > 0
+            and prev_tail_output is not None
+            and int(prev_tail_output.shape[0]) > 0
+        ):
+            _, _, _, opening_blend, color_match = resolve_continuity_guide_frames(
+                plan.continuity_overlap_frames
+            )
+            if opening_blend > 0:
+                decoded = soft_blend_segment_opening(
+                    decoded,
+                    prev_tail_output,
+                    opening_blend,
+                    width=ctx_w,
+                    height=ctx_h,
+                )
+            if color_match > 0:
+                decoded = match_opening_appearance_colors(
+                    decoded,
+                    prev_tail_output,
+                    color_match,
+                    width=ctx_w,
+                    height=ctx_h,
+                )
+
         chunk = decoded.cpu().float()
         save_segment_cache(node_id, seg, plan, chunk)
+        completed_outputs[seg.index] = chunk
 
         if plan.global_task_key in {"t2i", "i2i", "r2i"} and decoded.shape[0] >= 1:
             try:
@@ -481,6 +545,10 @@ def execute_director_plan(
         cached = load_segment_cache(node_id, seg, plan)
         if cached is not None:
             cached = pad_or_trim_frames(cached, seg.frame_count).cpu().float()
+            cached = apply_cached_segment_continuity(
+                cached, seg, plan, completed_outputs, width=plan.width, height=plan.height
+            )
+            completed_outputs[seg.index] = cached
             reports.append(
                 f"Segment {seg.index + 1}/{len(all_segments)}: "
                 f"loaded from cache ({cached.shape[0]} frames)"
@@ -519,5 +587,7 @@ def execute_director_plan(
 
     report_director_finish(node_id, seg_total)
 
-    combined = cat_frames_variable_size(output_chunks) if output_chunks else cat_frames_variable_size(segment_outputs)
+    export_chunks = output_chunks if output_chunks else segment_outputs
+    export_segments = all_segments if output_chunks else [all_segments[i] for i in sorted(run_indices)]
+    combined = concat_continuous_chunks(export_chunks, export_segments, plan)
     return combined, segment_outputs, "\n".join(reports)

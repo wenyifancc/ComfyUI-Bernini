@@ -34,6 +34,15 @@ from .plan import (
 )
 from .progress import report_director_finish, report_director_progress, report_director_segment_preview
 from .segment_cache import load_segment_cache, save_segment_cache
+from .segment_continuity import (
+    apply_cached_segment_continuity,
+    apply_scail_continuity_core,
+    concat_continuous_chunks,
+    resolve_continuity_guide_frames,
+    resolve_prev_segment_output,
+    match_opening_appearance_colors,
+    soft_blend_segment_opening,
+)
 from .vram_cleanup import cleanup_segment_vram
 
 log = logging.getLogger("ComfyUI-Bernini.director.core")
@@ -101,6 +110,12 @@ def execute_director_plan_core(
         reports.append(
             f"Run selection: {len(run_list)}/{len(all_segments)} segment(s) "
             f"(indices {[i + 1 for i in run_list]}; skipped {skipped or 'none'})"
+        )
+
+    completed_outputs: dict[int, torch.Tensor] = {}
+    if plan.continuity_enabled:
+        reports.append(
+            "Segment continuity: light gen guide (motion ctx + 1f ref); plain concat export"
         )
 
     def _run_one_segment(seg, *, progress_index: int) -> torch.Tensor:
@@ -226,6 +241,24 @@ def execute_director_plan_core(
             ref_max_size=plan.ref_max_size,
             **ref_kwargs,
         )
+        prev_tail_output = None
+        if plan.continuity_enabled:
+            prev_tail_output = resolve_prev_segment_output(
+                plan, all_segments, seg.index, completed_outputs, node_id
+            )
+            positive, negative, continuity_note = apply_scail_continuity_core(
+                plan=plan,
+                seg=seg,
+                prev_output=prev_tail_output,
+                positive=positive,
+                negative=negative,
+                vae=vae,
+                width=ctx_w,
+                height=ctx_h,
+                ref_max_size=plan.ref_max_size,
+            )
+            if continuity_note:
+                reports.append(continuity_note)
         report_director_progress(
             node_id,
             segment_index=progress_index,
@@ -308,8 +341,35 @@ def execute_director_plan_core(
             pad = decoded[-1:].repeat(target_len - decoded.shape[0], 1, 1, 1)
             decoded = torch.cat([decoded, pad], dim=0)
 
+        if (
+            plan.continuity_enabled
+            and seg.index > 0
+            and prev_tail_output is not None
+            and int(prev_tail_output.shape[0]) > 0
+        ):
+            _, _, _, opening_blend, color_match = resolve_continuity_guide_frames(
+                plan.continuity_overlap_frames
+            )
+            if opening_blend > 0:
+                decoded = soft_blend_segment_opening(
+                    decoded,
+                    prev_tail_output,
+                    opening_blend,
+                    width=ctx_w,
+                    height=ctx_h,
+                )
+            if color_match > 0:
+                decoded = match_opening_appearance_colors(
+                    decoded,
+                    prev_tail_output,
+                    color_match,
+                    width=ctx_w,
+                    height=ctx_h,
+                )
+
         chunk = decoded.cpu().float()
         save_segment_cache(node_id, seg, plan, chunk)
+        completed_outputs[seg.index] = chunk
 
         if plan.global_task_key in {"t2i", "i2i", "r2i"} and decoded.shape[0] >= 1:
             try:
@@ -374,6 +434,11 @@ def execute_director_plan_core(
 
         cached = load_segment_cache(node_id, seg, plan)
         if cached is not None:
+            cached = cached.float()
+            cached = apply_cached_segment_continuity(
+                cached, seg, plan, completed_outputs, width=plan.width, height=plan.height
+            )
+            completed_outputs[seg.index] = cached
             reports.append(
                 f"Segment {seg.index + 1}/{len(all_segments)}: "
                 f"loaded from cache ({cached.shape[0]} frames)"
@@ -395,11 +460,13 @@ def execute_director_plan_core(
                 f"Segment {seg.index + 1} is not selected and has no valid cache. "
                 "Run all segments once (全部运行), or include this segment in your run selection."
             )
-        output_chunks.append(cached.float())
+        output_chunks.append(cached)
 
     if not output_chunks and not segment_outputs:
         raise ValueError("Director plan produced no segments.")
 
     report_director_finish(node_id, seg_total)
-    combined = cat_frames_variable_size(output_chunks) if output_chunks else cat_frames_variable_size(segment_outputs)
+    export_chunks = output_chunks if output_chunks else segment_outputs
+    export_segments = all_segments if output_chunks else [all_segments[i] for i in sorted(run_indices)]
+    combined = concat_continuous_chunks(export_chunks, export_segments, plan)
     return combined, segment_outputs, "\n".join(reports)

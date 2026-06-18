@@ -34,6 +34,9 @@ from .gen_timeline import (
 log = logging.getLogger("ComfyUI-Bernini.director")
 
 MIN_SEGMENT_FRAMES = 4
+DEFAULT_CONTINUITY_OVERLAP = 9
+MIN_CONTINUITY_OVERLAP = 1
+MAX_CONTINUITY_OVERLAP = 81
 
 
 @dataclass
@@ -84,6 +87,8 @@ class DirectorPlan:
     export_max_frames: int = 0
     export_mode: str = "all"  # "all" | "segments"
     run_indices: frozenset[int] | None = None  # None = run all segments
+    continuity_enabled: bool = False
+    continuity_overlap_frames: int = 0
 
     @property
     def segment_count(self) -> int:
@@ -459,6 +464,12 @@ def build_director_plan(
             "Upload the content-to-insert clip for this segment in the Director node UI."
         )
 
+    from .segment_continuity import resolve_continuity_settings
+
+    continuity_enabled, continuity_overlap = resolve_continuity_settings(
+        timeline, segment_count=len(segments)
+    )
+
     return DirectorPlan(
         frame_rate=float(timeline.get("frameRate") or frame_rate or 24),
         total_frames=total,
@@ -480,6 +491,8 @@ def build_director_plan(
         export_max_frames=export_max,
         export_mode=export_mode,
         run_indices=_parse_run_selection(timeline, len(segments)),
+        continuity_enabled=continuity_enabled,
+        continuity_overlap_frames=continuity_overlap,
     )
 
 
@@ -565,6 +578,14 @@ def plan_summary(plan: DirectorPlan) -> str:
         )
     export_label = "分段导出" if plan.export_mode == "segments" else "全部导出"
     lines.append(f"Export mode: {export_label}")
+    if plan.continuity_enabled:
+        from .segment_continuity import resolve_continuity_guide_frames
+
+        ctx, refs, _, _, _ = resolve_continuity_guide_frames(plan.continuity_overlap_frames)
+        lines.append(
+            f"Segment continuity: overlap {plan.continuity_overlap_frames} "
+            f"→ {ctx}f ctx + {refs}f ref, plain concat (gen-only)"
+        )
     if plan.run_indices is not None:
         selected = sorted(plan.run_indices)
         skipped = [i + 1 for i in range(plan.segment_count) if i not in plan.run_indices]

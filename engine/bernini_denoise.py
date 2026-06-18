@@ -48,6 +48,9 @@ class BerniniDenoiseConfig:
     is_looped: bool = False
     context_fn: Callable | None = None
     batched_cfg: bool = False
+    masks: torch.Tensor | None = None
+    original_image: torch.Tensor | None = None
+    noise: torch.Tensor | None = None
 
 
 def _build_momentum_buffer(cfg: BerniniDenoiseConfig):
@@ -258,6 +261,21 @@ def run_bernini_denoise(
             noise_pred.unsqueeze(0), timestep, z.unsqueeze(0), **cfg.scheduler_step_args
         )[0].squeeze(0).detach().cpu()
         del noise_pred, z, timestep
+
+        if cfg.masks is not None and cfg.original_image is not None and cfg.noise is not None:
+            step_idx = idx + cfg.ttm_start_step
+            if step_idx < len(cfg.timesteps) - 1:
+                noise_timestep = cfg.timesteps[step_idx + 1]
+                image_latent = cfg.sample_scheduler.scale_noise(
+                    cfg.original_image.to(cfg.device),
+                    torch.tensor([noise_timestep]).to(cfg.device),
+                    cfg.noise.to(cfg.device),
+                )
+                mask = cfg.masks[step_idx].to(cfg.device)
+                if mask.ndim > latent.ndim:
+                    mask = mask.reshape(-1, *latent.shape)
+                latent_dev = latent.to(cfg.device)
+                latent = (image_latent * mask + latent_dev * (1 - mask)).detach().cpu()
 
     if cfg.force_offload and not cfg.model_meta.get("auto_cpu_offload"):
         offload_transformer(cfg.transformer)

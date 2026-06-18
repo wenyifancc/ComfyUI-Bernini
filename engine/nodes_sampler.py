@@ -28,6 +28,20 @@ from comfy.cli_args import args, LatentPreviewMethod
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
 device = mm.get_torch_device()
+
+
+def _latent_noise_mask_to_thw(noise_mask: torch.Tensor) -> torch.Tensor:
+    """Normalize noise_mask to [T, H, W] (accepts SCAIL-style [1, 1, T, H, W])."""
+    if noise_mask.ndim == 5:
+        return noise_mask.reshape(
+            noise_mask.shape[-3], noise_mask.shape[-2], noise_mask.shape[-1]
+        )
+    if noise_mask.ndim == 4:
+        if noise_mask.shape[1] == 1:
+            return noise_mask.squeeze(1)
+        if noise_mask.shape[0] == 1:
+            return noise_mask.squeeze(0)
+    return noise_mask
 offload_device = mm.unet_offload_device()
 
 rope_functions = ["default", "comfy", "comfy_chunked"]
@@ -692,6 +706,7 @@ class WanVideoSampler:
 
         # vid2vid
         noise_mask=original_image=None
+        input_noise_mask = None
         if samples is not None and not multitalk_sampling and not wananimate_loop:
             saved_generator_state = samples.get("generator_state", None)
             if saved_generator_state is not None:
@@ -710,12 +725,12 @@ class WanVideoSampler:
 
                 noise_mask = samples.get("noise_mask", None)
                 if noise_mask is not None:
+                    input_noise_mask = noise_mask
                     log.info(f"Latent noise_mask shape: {noise_mask.shape}")
                     original_image = samples.get("original_image", None)
                     if original_image is None:
                         original_image = input_samples
-                    if len(noise_mask.shape) == 4:
-                        noise_mask = noise_mask.squeeze(1)
+                    noise_mask = _latent_noise_mask_to_thw(noise_mask)
                     if noise_mask.shape[0] < noise.shape[1]:
                         noise_mask = noise_mask.repeat(noise.shape[1] // noise_mask.shape[0], 1, 1)
 
@@ -1776,6 +1791,9 @@ class WanVideoSampler:
                 is_looped=is_looped,
                 context_fn=context_fn,
                 batched_cfg=effective_batched_cfg,
+                masks=masks,
+                original_image=original_image.squeeze(0) if original_image is not None else None,
+                noise=noise,
             )
             latent = run_bernini_denoise(denoise_cfg, latent, callback=callback)
 
@@ -2394,8 +2412,7 @@ class WanVideoSampler:
                                 # diff diff prep
                                 noise_mask = samples.get("noise_mask", None)
                                 if noise_mask is not None:
-                                    if len(noise_mask.shape) == 4:
-                                        noise_mask = noise_mask.squeeze(1)
+                                    noise_mask = _latent_noise_mask_to_thw(noise_mask)
                                     if noise_mask.shape[0] < noise.shape[1]:
                                         noise_mask = noise_mask.repeat(noise.shape[1] // noise_mask.shape[0], 1, 1)
                                     else:
@@ -2705,6 +2722,7 @@ class WanVideoSampler:
             "drop_last": drop_last,
             "generator_state": seed_g.get_state(),
             "original_image": original_image.cpu() if original_image is not None else None,
+            "noise_mask": input_noise_mask.cpu() if input_noise_mask is not None else None,
             "cache_states": cache_states,
             "latent_ovi_audio": latent_ovi.unsqueeze(0).transpose(1, 2).cpu() if latent_ovi is not None else None,
             "flashvsr_LQ_images": LQ_images,

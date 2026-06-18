@@ -47,6 +47,29 @@ const DIRECTOR_MIN_WIDTH = 900;
 const COMFY_UPLOAD_SOFT_LIMIT = 95 * 1024 * 1024;
 const BERNINI_CHUNK_SIZE = 8 * 1024 * 1024;
 
+/** Segment continuity is opt-in; default off unless explicitly true in output. */
+function isContinuityEnabled(output) {
+    if (!output) return false;
+    return output.continuityEnabled === true || output.continuity_enabled === true;
+}
+
+function normalizeOutputContinuity(output = {}) {
+    const rawOverlap = output.continuityOverlapFrames ?? output.continuity_overlap_frames ?? 9;
+    return {
+        ...output,
+        continuityEnabled: isContinuityEnabled(output),
+        continuityOverlapFrames: Math.max(1, Math.min(81, parseInt(rawOverlap, 10) || 9)),
+    };
+}
+
+function stripTimelineContinuityRootFields(timeline) {
+    if (!timeline || typeof timeline !== "object") return;
+    delete timeline.continuityEnabled;
+    delete timeline.continuity_enabled;
+    delete timeline.continuityOverlapFrames;
+    delete timeline.continuity_overlap_frames;
+}
+
 const HIDDEN_WIDGETS = [
     "timeline_data", "total_frames", "width", "height", "ref_max_size",
     "task_type", "global_prompt", "frame_rate", "negative_prompt",
@@ -217,8 +240,9 @@ const STYLES = `
 .bd-ref-video-col{display:flex;flex-direction:column;gap:4px;min-width:0;width:100%;flex:1}
 .bd-ref-video-col .bd-gen-src{min-height:140px;max-height:none;flex:1}
 .bd-ref-video-name{word-break:break-all;line-height:1.3}
-.bd-continuous-ref{display:flex;align-items:center;gap:6px;font-size:10px;color:#aaa;cursor:pointer;user-select:none;margin-top:2px}
-.bd-continuous-ref input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
+.bd-continuous-ref{display:flex;align-items:center;gap:6px;font-size:10px;color:#aaa;user-select:none;margin-left:8px}
+.bd-continuous-ref label{display:flex;align-items:center;gap:4px;cursor:pointer}
+.bd-continuous-ref input[type="checkbox"]{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 .bd-gen-fc-row{display:flex;align-items:center;gap:6px;margin-top:6px}
 ${IMAGE_BATCH_STYLES}
 @media(max-width:480px){
@@ -543,7 +567,7 @@ function parseTimeline(raw, totalFrames, fps) {
         },
         videoClips: [],
         global: { taskType: "", prompt: "", refs: [], referenceVideo: {}, continuousReference: false },
-        output: { mode: "long_edge", longEdge: 848, width: 832, height: 480, maxExportFrames: 0, exportMode: "all" },
+        output: { mode: "long_edge", longEdge: 848, width: 832, height: 480, maxExportFrames: 0, exportMode: "all", continuityEnabled: false, continuityOverlapFrames: 9 },
         runSelectEnabled: false,
         runSelection: [],
         segments: [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], referenceVideo: {} }],
@@ -571,14 +595,17 @@ function parseTimeline(raw, totalFrames, fps) {
         }
         delete data.referenceVideo;
         delete data.reference_video;
-        data.output = {
+        data.output = normalizeOutputContinuity({
             mode: data.output?.mode || "long_edge",
             longEdge: data.output?.longEdge ?? data.output?.long_edge ?? data.refMaxSize ?? 848,
             width: data.output?.width ?? data.width ?? 832,
             height: data.output?.height ?? data.height ?? 480,
             maxExportFrames: data.output?.maxExportFrames ?? data.output?.max_export_frames ?? 0,
             exportMode: data.output?.exportMode ?? data.output?.export_mode ?? "all",
-        };
+            continuityEnabled: data.output?.continuityEnabled ?? data.output?.continuity_enabled,
+            continuityOverlapFrames: data.output?.continuityOverlapFrames ?? data.output?.continuity_overlap_frames,
+        });
+        stripTimelineContinuityRootFields(data);
         const legacyFrames = data.video.frames?.length || 0;
         if (!data.video.frameMap?.length) {
             const n = data.totalFrames || data.video.sourceFrameCount || legacyFrames || total;
@@ -791,10 +818,10 @@ class BerniniDirectorEditor {
             const outMode = imageBatchRequiresFixedOutput(taskKey)
                 ? "fixed"
                 : (this.timeline.output?.mode || "long_edge");
-            const output = {
+            const output = normalizeOutputContinuity({
                 ...this.timeline.output,
                 mode: outMode,
-            };
+            });
             if (!isVideoBatchTask(taskKey)) {
                 output.exportMode = "all";
             }
@@ -802,8 +829,10 @@ class BerniniDirectorEditor {
                 output.sourceWidth = i2iSrc.width;
                 output.sourceHeight = i2iSrc.height;
             }
+            const batchBody = { ...this.timeline };
+            stripTimelineContinuityRootFields(batchBody);
             return {
-                ...this.timeline,
+                ...batchBody,
                 version: 5,
                 timelineMode: "prompt_batch",
                 editMode: "segment",
@@ -834,8 +863,10 @@ class BerniniDirectorEditor {
         }
         if (this.isGenMode()) {
             const mode = this.getDirectorMode();
+            const genBody = { ...this.timeline };
+            stripTimelineContinuityRootFields(genBody);
             return {
-                ...this.timeline,
+                ...genBody,
                 version: 5,
                 timelineMode: mode,
                 totalFrames: sumFrameCounts(this.timeline.segments),
@@ -848,7 +879,7 @@ class BerniniDirectorEditor {
                     taskType: this.globalTask?.value || this.taskTypeWidget?.value || "",
                     prompt: this.timeline.global?.prompt || "",
                 },
-                output: { ...this.timeline.output },
+                output: normalizeOutputContinuity({ ...this.timeline.output }),
                 segments: this.timeline.segments.map((s) => ({
                     ...s,
                     frameCount: s.frameCount ?? s.length,
@@ -870,6 +901,7 @@ class BerniniDirectorEditor {
             storageHeight: storageH,
         }));
         const { referenceVideo: _legacyRefVideo, reference_video: _legacyRefVideo2, ...timelineBody } = this.timeline;
+        stripTimelineContinuityRootFields(timelineBody);
         return {
             ...timelineBody,
             version: 4,
@@ -897,6 +929,7 @@ class BerniniDirectorEditor {
                 storageWidth: storageW,
                 storageHeight: storageH,
             },
+            output: normalizeOutputContinuity({ ...this.timeline.output }),
             ...this._runSelectionPayload(),
         };
     }
@@ -1011,7 +1044,12 @@ class BerniniDirectorEditor {
                 <option value="segments">分段导出</option>
             </select>
             <label title="0 = 导出全部帧；大于 0 时仅处理前 N 帧">最大帧数</label>
-            <input type="number" class="bd-num" data-r="out-max-frames" min="0" max="999999" step="1" value="0" style="width:64px" title="0 = 全部导出">`;
+            <input type="number" class="bd-num" data-r="out-max-frames" min="0" max="999999" step="1" value="0" style="width:64px" title="0 = 全部导出">
+            <span class="bd-continuous-ref hidden" data-r="segment-continuity-wrap" title="多段衔接：使用上一段的后N帧引导生成视频">
+                <label><input type="checkbox" data-r="segment-continuity-cb">段间引导</label>
+                <span class="bd-meta">参考帧数</span>
+                <input type="number" class="bd-num" data-r="segment-continuity-overlap" min="1" max="81" step="4" value="9" style="width:48px" title="建议取9或13帧作为引导帧">
+            </span>`;
         this.mainBody.appendChild(outputBar);
 
         const bottom = document.createElement("div");
@@ -1170,6 +1208,9 @@ class BerniniDirectorEditor {
         this.fpsInput = this.root.querySelector('[data-r="timeline-fps"]');
         this.outMaxFrames = this.root.querySelector('[data-r="out-max-frames"]');
         this.outExportMode = this.root.querySelector('[data-r="out-export-mode"]');
+        this.segmentContinuityWrap = this.root.querySelector('[data-r="segment-continuity-wrap"]');
+        this.segmentContinuityCb = this.root.querySelector('[data-r="segment-continuity-cb"]');
+        this.segmentContinuityOverlap = this.root.querySelector('[data-r="segment-continuity-overlap"]');
         this.outPreview = this.root.querySelector('[data-r="out-preview"]');
         this.runStatusEl = this.root.querySelector('[data-r="run-status"]');
         this.runTitleEl = this.root.querySelector('[data-r="run-title"]');
@@ -1256,6 +1297,19 @@ class BerniniDirectorEditor {
         };
         this.outMaxFrames.onchange = () => this.onOutputField("maxExportFrames", +this.outMaxFrames.value);
         this.outExportMode.onchange = () => this.onOutputField("exportMode", this.outExportMode.value);
+        if (this.segmentContinuityCb) {
+            this.segmentContinuityCb.onchange = () => {
+                this.onOutputField("continuityEnabled", this.segmentContinuityCb.checked);
+                this.updateSegmentContinuityUI();
+            };
+        }
+        if (this.segmentContinuityOverlap) {
+            const applyOverlap = () => this.onOutputField("continuityOverlapFrames", +this.segmentContinuityOverlap.value);
+            this.segmentContinuityOverlap.onchange = applyOverlap;
+            this.segmentContinuityOverlap.oninput = applyOverlap;
+            this.segmentContinuityOverlap.addEventListener("keydown", (e) => e.stopPropagation());
+            this.segmentContinuityOverlap.addEventListener("keyup", (e) => e.stopPropagation());
+        }
 
         this.genGlobalImg?.addEventListener("click", (e) => { stopDomEvent(e); this.pickGenSrcImage(true); });
         this.genSegImg?.addEventListener("click", (e) => { stopDomEvent(e); this.pickGenSrcImage(false); });
@@ -2533,16 +2587,31 @@ class BerniniDirectorEditor {
     }
 
     syncOutputUIFromTimeline() {
-        const out = this.timeline.output || { mode: "long_edge", longEdge: 848, width: 832, height: 480, maxExportFrames: 0, exportMode: "all" };
+        const out = this.timeline.output || {
+            mode: "long_edge", longEdge: 848, width: 832, height: 480,
+            maxExportFrames: 0, exportMode: "all",
+            continuityEnabled: false, continuityOverlapFrames: 9,
+        };
         if (this.outMode) this.outMode.value = out.mode || "long_edge";
         if (this.outLong) this.outLong.value = String(out.longEdge ?? 848);
         if (this.outW) this.outW.value = String(out.width ?? 832);
         if (this.outH) this.outH.value = String(out.height ?? 480);
         if (this.outMaxFrames) this.outMaxFrames.value = String(out.maxExportFrames ?? 0);
         if (this.outExportMode) this.outExportMode.value = out.exportMode === "segments" ? "segments" : "all";
+        if (this.segmentContinuityCb) this.segmentContinuityCb.checked = isContinuityEnabled(out);
+        if (this.segmentContinuityOverlap) {
+            this.segmentContinuityOverlap.value = String(out.continuityOverlapFrames ?? 9);
+        }
         this.syncFrameRateUI(this.timeline.frameRate);
         this.updateOutputModeUI();
+        this.updateSegmentContinuityUI();
         this.updateOutputPreview();
+    }
+
+    updateSegmentContinuityUI() {
+        if (!this.segmentContinuityWrap) return;
+        const show = !this.isGenMode() && !this.isImageBatch() && (this.timeline.segments?.length ?? 0) >= 2;
+        this.segmentContinuityWrap.classList.toggle("hidden", !show);
     }
 
     updateOutputModeUI() {
@@ -2600,7 +2669,11 @@ class BerniniDirectorEditor {
     }
 
     onOutputField(key, value) {
-        this.timeline.output = this.timeline.output || { mode: "long_edge", longEdge: 848, width: 832, height: 480, maxExportFrames: 0, exportMode: "all" };
+        this.timeline.output = this.timeline.output || {
+            mode: "long_edge", longEdge: 848, width: 832, height: 480,
+            maxExportFrames: 0, exportMode: "all",
+            continuityEnabled: false, continuityOverlapFrames: 9,
+        };
         if (key === "mode") {
             this.timeline.output.mode = value;
         } else if (key === "longEdge") {
@@ -2614,9 +2687,17 @@ class BerniniDirectorEditor {
             this.timeline.output.maxExportFrames = Number.isFinite(n) && n > 0 ? n : 0;
         } else if (key === "exportMode") {
             this.timeline.output.exportMode = value === "segments" ? "segments" : "all";
+        } else if (key === "continuityEnabled") {
+            this.timeline.output.continuityEnabled = !!value;
+        } else if (key === "continuityOverlapFrames") {
+            const n = parseInt(value, 10);
+            this.timeline.output.continuityOverlapFrames = Number.isFinite(n)
+                ? Math.max(1, Math.min(81, n))
+                : 9;
         }
         this.syncOutputUIFromTimeline();
         this.commit();
+        this.flushTimelineSync();
     }
 
     syncOutputToWidgets() {
@@ -2680,6 +2761,9 @@ class BerniniDirectorEditor {
             height: resolved.height,
             maxExportFrames: this.timeline.output?.maxExportFrames ?? 0,
             exportMode: this.timeline.output?.exportMode ?? "all",
+            continuityEnabled: isContinuityEnabled(this.timeline.output),
+            continuityOverlapFrames: Math.max(1, Math.min(81,
+                parseInt(this.timeline.output?.continuityOverlapFrames ?? 9, 10) || 9)),
         };
         if (this.widthWidget) this.widthWidget.value = resolved.width;
         if (this.heightWidget) this.heightWidget.value = resolved.height;
@@ -2700,7 +2784,20 @@ class BerniniDirectorEditor {
         }
         this.timeline.totalFrames = this.getTotalFrames();
         this.timeline.frameRate = this.getFrameRate();
-        this.timeline.output = this.timeline.output || { mode: "long_edge", longEdge: 848, width: 832, height: 480, maxExportFrames: 0, exportMode: "all" };
+        this.timeline.output = this.timeline.output || {
+            mode: "long_edge", longEdge: 848, width: 832, height: 480,
+            maxExportFrames: 0, exportMode: "all",
+            continuityEnabled: false, continuityOverlapFrames: 9,
+        };
+        if (this.segmentContinuityCb) {
+            this.timeline.output.continuityEnabled = !!this.segmentContinuityCb.checked;
+        }
+        if (this.segmentContinuityOverlap) {
+            const n = parseInt(this.segmentContinuityOverlap.value, 10);
+            this.timeline.output.continuityOverlapFrames = Number.isFinite(n)
+                ? Math.max(1, Math.min(81, n))
+                : (this.timeline.output.continuityOverlapFrames ?? 9);
+        }
         this.syncOutputToWidgets();
     }
 
@@ -2757,6 +2854,7 @@ class BerniniDirectorEditor {
         this.timeline.segments = fixed;
         this.timeline.totalFrames = total;
         this.selectedIndex = clamp(this.selectedIndex, 0, Math.max(0, fixed.length - 1));
+        this.updateSegmentContinuityUI();
     }
 
     getVideoViewUrl() {
