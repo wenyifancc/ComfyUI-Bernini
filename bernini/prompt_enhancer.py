@@ -44,10 +44,15 @@ DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_OLLAMA_MODEL = "qwen3.5"
 DEFAULT_ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4"
 DEFAULT_ZHIPU_MODEL = "glm-4.6v-flash"
+DEFAULT_OPENAI_COMPAT_URL = "http://127.0.0.1:8080/v1"
 API_FORMAT_OLLAMA = "Ollama"
 API_FORMAT_ZHIPU = "智谱 GLM"
+API_FORMAT_OPENAI_COMPAT = "OpenAI Compatible"
 _LEGACY_OPENAI_FORMAT = "OpenAI / vLLM"
 DEFAULT_API_FORMAT = API_FORMAT_OLLAMA
+OPENAI_COMPAT_MODE_STANDARD = "标准"
+OPENAI_COMPAT_MODE_LLAMA_SWAP = "llama-swap"
+DEFAULT_OPENAI_COMPAT_MODE = OPENAI_COMPAT_MODE_STANDARD
 DEFAULT_OLLAMA_NUM_CTX = int(os.environ.get("BERNINI_PE_OLLAMA_NUM_CTX", "32768"))
 MAX_OLLAMA_VISION_IMAGES = int(os.environ.get("BERNINI_PE_OLLAMA_MAX_VISION", "4"))
 
@@ -74,6 +79,10 @@ def coerce_llm_url(value, default: str = DEFAULT_OLLAMA_URL) -> str:
 def default_url_for_format(api_format: str) -> str:
     if api_format == API_FORMAT_ZHIPU:
         return DEFAULT_ZHIPU_URL
+    if api_format == _LEGACY_OPENAI_FORMAT:
+        return DEFAULT_OPENAI_COMPAT_URL
+    if api_format == API_FORMAT_OPENAI_COMPAT:
+        return DEFAULT_OPENAI_COMPAT_URL
     if api_format == API_FORMAT_OLLAMA:
         return "http://127.0.0.1:11434"
     return DEFAULT_OLLAMA_URL
@@ -83,6 +92,13 @@ def default_model_for_format(api_format: str) -> str:
     if api_format == API_FORMAT_ZHIPU:
         return DEFAULT_ZHIPU_MODEL
     return DEFAULT_OLLAMA_MODEL
+
+
+def normalize_openai_compat_mode(value: str | None = None) -> str:
+    mode = str(value or "").strip()
+    if mode.lower() == OPENAI_COMPAT_MODE_LLAMA_SWAP:
+        return OPENAI_COMPAT_MODE_LLAMA_SWAP
+    return OPENAI_COMPAT_MODE_STANDARD
 
 
 def ollama_native_base(url: str) -> str:
@@ -99,6 +115,14 @@ def openai_compat_base(url: str) -> str:
     if base.lower().endswith("/v1"):
         return base
     return f"{base}/v1"
+
+
+def openai_compat_root(url: str) -> str:
+    """Server root for OpenAI-compatible services that expose side APIs."""
+    base = coerce_llm_url(url, default=DEFAULT_OPENAI_COMPAT_URL)
+    if base.lower().endswith("/v1"):
+        return base[:-3].rstrip("/")
+    return base
 
 
 def zhipu_base(url: str) -> str:
@@ -127,8 +151,8 @@ def llm_models_endpoint(url: str, api_format: str) -> str:
 
 def infer_api_format(url: str, explicit: str = DEFAULT_API_FORMAT) -> str:
     if explicit == _LEGACY_OPENAI_FORMAT:
-        explicit = API_FORMAT_OLLAMA
-    if explicit in (API_FORMAT_OLLAMA, API_FORMAT_ZHIPU):
+        explicit = API_FORMAT_OPENAI_COMPAT
+    if explicit in (API_FORMAT_OLLAMA, API_FORMAT_ZHIPU, API_FORMAT_OPENAI_COMPAT):
         return explicit
     base = coerce_llm_url(url)
     if "bigmodel.cn" in base.lower():
@@ -138,6 +162,16 @@ def infer_api_format(url: str, explicit: str = DEFAULT_API_FORMAT) -> str:
 
 def llm_unload_endpoint(url: str) -> str:
     return f"{ollama_native_base(url)}/api/generate"
+
+
+def llama_swap_unload_endpoint(url: str, model: str | None = None) -> str:
+    """Endpoint for llama-swap model unload API."""
+    from urllib.parse import quote
+
+    base = openai_compat_root(url)
+    if model:
+        return f"{base}/api/models/unload/{quote(model, safe='')}"
+    return f"{base}/api/models/unload"
 
 
 def coerce_llm_model(value, default: str = DEFAULT_OLLAMA_MODEL) -> str:
@@ -223,6 +257,38 @@ def llm_headers(
         if key:
             headers["Authorization"] = f"Bearer {key}"
     return headers
+
+
+def unload_llama_swap_model_sync(
+    url: str,
+    model: str,
+    *,
+    api_key: str = "",
+    timeout: int = 10,
+) -> str | None:
+    """Unload a llama-swap model; returns an error string on failure."""
+    model = (model or "").strip()
+    if not model:
+        return "No model selected"
+    endpoint = llama_swap_unload_endpoint(url, model)
+    try:
+        req = urllib.request.Request(
+            endpoint,
+            data=b"",
+            headers=llm_headers(API_FORMAT_OPENAI_COMPAT, include_json=False, api_key=api_key),
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if not (200 <= resp.status < 300):
+                body = resp.read().decode("utf-8", errors="replace")
+                return f"llama-swap HTTP {resp.status}: {body[:200]}"
+            resp.read()
+        return None
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return f"llama-swap HTTP {exc.code}: {body[:200] or exc.reason}"
+    except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError) as exc:
+        return f"{type(exc).__name__}: {exc} ({endpoint})"
 
 
 def _is_openai_new_completion_model(model: str) -> bool:
@@ -502,6 +568,7 @@ def enhance_prompt_sync(
     url: str = DEFAULT_OLLAMA_URL,
     model: str = DEFAULT_OLLAMA_MODEL,
     api_format: str = DEFAULT_API_FORMAT,
+    openai_compat_mode: str = DEFAULT_OPENAI_COMPAT_MODE,
     api_key: str = "",
     images_b64: list[str] | None = None,
     image_num: int | None = None,
@@ -522,6 +589,7 @@ def enhance_prompt_sync(
 
     base_url = coerce_llm_url(url, default=default_url_for_format(api_format))
     api_format = infer_api_format(base_url, api_format)
+    openai_compat_mode = normalize_openai_compat_mode(openai_compat_mode)
     endpoint = llm_chat_endpoint(base_url, api_format)
 
     if api_format == API_FORMAT_ZHIPU and not resolve_api_key(api_format, api_key):
@@ -868,6 +936,19 @@ def enhance_prompt_sync(
                 han,
                 DETAILED_MIN_TOTAL_HAN,
             )
+        if (
+            unload_after
+            and api_format == API_FORMAT_OPENAI_COMPAT
+            and openai_compat_mode == OPENAI_COMPAT_MODE_LLAMA_SWAP
+        ):
+            unload_err = unload_llama_swap_model_sync(
+                base_url,
+                model,
+                api_key=api_key,
+                timeout=min(max(timeout, 1), 10),
+            )
+            if unload_err:
+                log.warning("llama-swap unload failed after enhance: %s", unload_err)
         return parsed, None
 
     return None, last_err or f"LLM enhance failed (last {last_han} han)"

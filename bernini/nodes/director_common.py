@@ -89,7 +89,7 @@ def timeline_required_inputs() -> dict:
 
 
 def director_llm_enhance_inputs() -> dict:
-    """LLM prompt enhancement widgets (Bernini official templates + Ollama/vLLM)."""
+    """LLM prompt enhancement widgets (Bernini official templates + LLM APIs)."""
     return {
         "bd_grp_pe": ("BDGROUP", {"default": "提示词增强 LLM Prompt Enhancer"}),
         "llm_auto_enhance": (
@@ -103,12 +103,23 @@ def director_llm_enhance_inputs() -> dict:
             },
         ),
         "llm_api_format": (
-            ["Ollama", "智谱 GLM"],
+            ["Ollama", "智谱 GLM", "OpenAI Compatible"],
             {
                 "default": "Ollama",
                 "tooltip": (
                     "Ollama 原生：/api/chat；"
-                    "智谱 GLM：https://open.bigmodel.cn/api/paas/v4/chat/completions。"
+                    "智谱 GLM：https://open.bigmodel.cn/api/paas/v4/chat/completions；"
+                    "OpenAI Compatible：/v1/chat/completions（llama.cpp / vLLM / llama-swap 等）。"
+                ),
+            },
+        ),
+        "llm_openai_compat_mode": (
+            ["标准", "llama-swap"],
+            {
+                "default": "标准",
+                "tooltip": (
+                    "仅在 OpenAI Compatible 格式下生效。选择 llama-swap 后可使用其模型卸载接口："
+                    "POST /api/models/unload/{model_id}。"
                 ),
             },
         ),
@@ -118,7 +129,8 @@ def director_llm_enhance_inputs() -> dict:
                 "default": "http://127.0.0.1:11434/v1",
                 "tooltip": (
                     "LLM 服务地址。Ollama：http://127.0.0.1:11434/v1；"
-                    "智谱：https://open.bigmodel.cn/api/paas/v4。"
+                    "智谱：https://open.bigmodel.cn/api/paas/v4；"
+                    "OpenAI Compatible：http://127.0.0.1:8080/v1。"
                 ),
             },
         ),
@@ -126,7 +138,7 @@ def director_llm_enhance_inputs() -> dict:
             "STRING",
             {
                 "default": "",
-                "tooltip": "智谱 API Key（Bearer）。也可设环境变量 ZHIPU_API_KEY / BERNINI_PE_API_KEY。",
+                "tooltip": "智谱 API Key（Bearer）。OpenAI Compatible / llama-swap 可选。也可设环境变量 ZHIPU_API_KEY / BERNINI_PE_API_KEY。",
             },
         ),
         "llm_model": (
@@ -136,7 +148,8 @@ def director_llm_enhance_inputs() -> dict:
                 "tooltip": (
                     "模型名称。Ollama 默认 qwen3.5。"
                     "智谱默认 glm-4.6v-flash（支持参考图/视频帧 Base64）；"
-                    "纯文本可选用 glm-4-flash-250414。"
+                    "纯文本可选用 glm-4-flash-250414；"
+                    "OpenAI Compatible 填 /v1/models 返回的模型 id。"
                 ),
             },
         ),

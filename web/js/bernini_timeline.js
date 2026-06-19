@@ -73,7 +73,7 @@ function stripTimelineContinuityRootFields(timeline) {
 const HIDDEN_WIDGETS = [
     "timeline_data", "total_frames", "width", "height", "ref_max_size",
     "task_type", "global_prompt", "frame_rate", "negative_prompt",
-    "bd_grp_pe", "llm_auto_enhance", "llm_api_format", "llm_url", "llm_api_key", "llm_model",
+    "bd_grp_pe", "llm_auto_enhance", "llm_api_format", "llm_openai_compat_mode", "llm_url", "llm_api_key", "llm_model",
     "llm_unload_after", "llm_output_language", "llm_character_feature_enhance", "llm_custom_template",
 ];
 

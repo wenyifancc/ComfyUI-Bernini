@@ -12,10 +12,12 @@ from ..prompt_enhancer import (
     DEFAULT_API_FORMAT,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_URL,
+    DEFAULT_OPENAI_COMPAT_MODE,
     coerce_llm_model,
     coerce_llm_url,
     enhance_prompt_sync,
     infer_api_format,
+    normalize_openai_compat_mode,
 )
 from .prompt_enhance_media import collect_segment_vision_b64
 
@@ -26,6 +28,7 @@ log = logging.getLogger("ComfyUI-Bernini.director")
 class PromptEnhanceSettings:
     auto_enhance: bool = False
     api_format: str = DEFAULT_API_FORMAT
+    openai_compat_mode: str = DEFAULT_OPENAI_COMPAT_MODE
     url: str = DEFAULT_OLLAMA_URL
     model: str = DEFAULT_OLLAMA_MODEL
     api_key: str = ""
@@ -40,6 +43,7 @@ class PromptEnhanceSettings:
         *,
         llm_auto_enhance=False,
         llm_api_format=DEFAULT_API_FORMAT,
+        llm_openai_compat_mode=DEFAULT_OPENAI_COMPAT_MODE,
         llm_url=DEFAULT_OLLAMA_URL,
         llm_api_key="",
         llm_model=DEFAULT_OLLAMA_MODEL,
@@ -55,6 +59,7 @@ class PromptEnhanceSettings:
         return cls(
             auto_enhance=bool(llm_auto_enhance),
             api_format=fmt,
+            openai_compat_mode=normalize_openai_compat_mode(llm_openai_compat_mode),
             url=coerce_llm_url(llm_url),
             model=coerce_llm_model(llm_model),
             api_key=str(llm_api_key or "").strip(),
@@ -110,6 +115,7 @@ def maybe_enhance_segment_prompt(
         url=settings.url,
         model=settings.model,
         api_format=api_format,
+        openai_compat_mode=settings.openai_compat_mode,
         api_key=settings.api_key,
         images_b64=images_b64,
         image_num=ref_count,

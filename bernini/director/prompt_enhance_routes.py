@@ -14,7 +14,23 @@ from ..prompt_enhance_templates import (
     get_enhance_template,
     is_character_feature_enhance_enabled,
 )
-from ..prompt_enhancer import DEFAULT_API_FORMAT, coerce_llm_model, coerce_llm_url, enhance_prompt_sync, infer_api_format, list_llm_models, llm_unload_endpoint
+from ..prompt_enhancer import (
+    API_FORMAT_OLLAMA,
+    API_FORMAT_OPENAI_COMPAT,
+    DEFAULT_API_FORMAT,
+    DEFAULT_OPENAI_COMPAT_MODE,
+    OPENAI_COMPAT_MODE_LLAMA_SWAP,
+    coerce_llm_model,
+    coerce_llm_url,
+    default_url_for_format,
+    enhance_prompt_sync,
+    infer_api_format,
+    list_llm_models,
+    llama_swap_unload_endpoint,
+    llm_headers,
+    llm_unload_endpoint,
+    normalize_openai_compat_mode,
+)
 from ..task_prompts import resolve_task_key
 from .prompt_enhance_media import extract_input_video_frames_b64, load_input_image_b64
 
@@ -26,8 +42,9 @@ async def director_enhance_models(request):
         data = await request.json()
     except Exception:
         data = {}
-    url = coerce_llm_url(data.get("llm_url") or data.get("ollama_url"))
-    api_format = infer_api_format(url, data.get("api_format") or data.get("llm_api_format") or DEFAULT_API_FORMAT)
+    raw_url = data.get("llm_url") or data.get("ollama_url")
+    api_format = infer_api_format(raw_url or "", data.get("api_format") or data.get("llm_api_format") or DEFAULT_API_FORMAT)
+    url = coerce_llm_url(raw_url, default=default_url_for_format(api_format))
     api_key = (data.get("api_key") or data.get("llm_api_key") or "").strip()
     models, err = await list_llm_models(url, api_format, api_key=api_key)
     if err:
@@ -63,8 +80,14 @@ async def director_enhance_prompt(request):
         return web.json_response({"error": "Empty prompt"}, status=400)
 
     task_type = data.get("task_type") or "default"
-    url = coerce_llm_url(data.get("llm_url") or data.get("ollama_url"))
-    api_format = infer_api_format(url, data.get("api_format") or data.get("llm_api_format") or DEFAULT_API_FORMAT)
+    raw_url = data.get("llm_url") or data.get("ollama_url")
+    api_format = infer_api_format(raw_url or "", data.get("api_format") or data.get("llm_api_format") or DEFAULT_API_FORMAT)
+    url = coerce_llm_url(raw_url, default=default_url_for_format(api_format))
+    openai_compat_mode = normalize_openai_compat_mode(
+        data.get("openai_compat_mode")
+        or data.get("llm_openai_compat_mode")
+        or DEFAULT_OPENAI_COMPAT_MODE
+    )
     api_key = (data.get("api_key") or data.get("llm_api_key") or "").strip()
     images = data.get("images") or []
     image_num = int(data.get("image_num") or max(1, len(images)))
@@ -90,6 +113,7 @@ async def director_enhance_prompt(request):
             url=url,
             model=model,
             api_format=api_format,
+            openai_compat_mode=openai_compat_mode,
             api_key=api_key,
             images_b64=images if images else None,
             image_num=image_num,
@@ -156,31 +180,60 @@ async def director_image_b64(request):
     return web.json_response({"image": b64})
 
 
-async def director_unload_ollama(request):
+async def director_unload_model(request):
     import aiohttp
 
     try:
         data = await request.json()
     except Exception:
         data = {}
-    url = coerce_llm_url(data.get("llm_url") or data.get("ollama_url"))
+    raw_url = data.get("llm_url") or data.get("ollama_url")
+    api_format = infer_api_format(raw_url or "", data.get("api_format") or data.get("llm_api_format") or API_FORMAT_OLLAMA)
+    url = coerce_llm_url(raw_url, default=default_url_for_format(api_format))
     model = coerce_llm_model((data.get("model") or data.get("llm_model") or "").strip())
     if not model:
         return web.json_response({"error": "No model selected"}, status=400)
+    openai_compat_mode = normalize_openai_compat_mode(
+        data.get("openai_compat_mode")
+        or data.get("llm_openai_compat_mode")
+        or DEFAULT_OPENAI_COMPAT_MODE
+    )
+    api_key = (data.get("api_key") or data.get("llm_api_key") or "").strip()
+
+    if api_format == API_FORMAT_OLLAMA:
+        endpoint = llm_unload_endpoint(url)
+        payload = {"model": model, "keep_alive": 0}
+        headers = None
+        success_label = "Ollama"
+    elif api_format == API_FORMAT_OPENAI_COMPAT and openai_compat_mode == OPENAI_COMPAT_MODE_LLAMA_SWAP:
+        endpoint = llama_swap_unload_endpoint(url, model)
+        payload = None
+        headers = llm_headers(api_format, include_json=False, api_key=api_key)
+        success_label = "llama-swap"
+    else:
+        return web.json_response({"error": "Current API format does not support model unload"}, status=400)
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                llm_unload_endpoint(url),
-                json={"model": model, "keep_alive": 0},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
+            kwargs = {
+                "timeout": aiohttp.ClientTimeout(total=10),
+            }
+            if payload is not None:
+                kwargs["json"] = payload
+            if headers:
+                kwargs["headers"] = headers
+            async with session.post(endpoint, **kwargs) as resp:
+                if not (200 <= resp.status < 300):
                     text = await resp.text()
-                    return web.json_response({"error": f"Ollama HTTP {resp.status}: {text[:200]}"}, status=502)
+                    return web.json_response({"error": f"{success_label} HTTP {resp.status}: {text[:200]}"}, status=502)
                 await resp.read()
-        return web.json_response({"status": "unloaded", "model": model})
+        return web.json_response({"status": "unloaded", "model": model, "provider": success_label})
     except Exception as exc:
         return web.json_response({"error": f"{type(exc).__name__}: {exc}"}, status=502)
+
+
+async def director_unload_ollama(request):
+    return await director_unload_model(request)
 
 
 def register_prompt_enhance_routes(routes, register_route) -> None:
@@ -189,5 +242,6 @@ def register_prompt_enhance_routes(routes, register_route) -> None:
     register_route(routes, "POST", "/bernini/director/enhance", director_enhance_prompt)
     register_route(routes, "POST", "/bernini/director/extract_frames", director_extract_frames)
     register_route(routes, "POST", "/bernini/director/image_b64", director_image_b64)
+    register_route(routes, "POST", "/bernini/director/unload_model", director_unload_model)
     register_route(routes, "POST", "/bernini/director/unload_ollama", director_unload_ollama)
     log.info("Bernini Director prompt-enhance HTTP routes registered")

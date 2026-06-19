@@ -231,6 +231,7 @@ class BerniniDirectorOfficial:
         export_source_images=False,
         llm_auto_enhance=False,
         llm_api_format="Ollama",
+        llm_openai_compat_mode="标准",
         llm_url="http://127.0.0.1:11434/v1",
         llm_api_key="",
         llm_model="qwen3.5",
@@ -244,6 +245,7 @@ class BerniniDirectorOfficial:
         prompt_enhance = PromptEnhanceSettings.from_node(
             llm_auto_enhance=llm_auto_enhance,
             llm_api_format=llm_api_format,
+            llm_openai_compat_mode=llm_openai_compat_mode,
             llm_url=llm_url,
             llm_api_key=llm_api_key,
             llm_model=llm_model,

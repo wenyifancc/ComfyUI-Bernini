@@ -4,15 +4,19 @@ import { api } from "../../scripts/api.js";
 import { resolveTaskKey, taskUsesReferenceImages, taskUsesReferenceVideo } from "./bernini_gen_timeline.js";
 
 export const PE_PANEL_COLLAPSED_H = 34;
-export const PE_PANEL_EXPANDED_H = 348;
+export const PE_PANEL_EXPANDED_H = 374;
 
 const DEFAULT_LLM_URL = "http://127.0.0.1:11434/v1";
 const DEFAULT_LLM_MODEL = "qwen3.5";
 const DEFAULT_ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4";
 const DEFAULT_ZHIPU_MODEL = "glm-4.6v-flash";
+const DEFAULT_OPENAI_COMPAT_URL = "http://127.0.0.1:8080/v1";
 const DEFAULT_API_FORMAT = "Ollama";
 const API_OLLAMA = "Ollama";
 const API_ZHIPU = "智谱 GLM";
+const API_OPENAI_COMPAT = "OpenAI Compatible";
+const OPENAI_COMPAT_STANDARD = "标准";
+const OPENAI_COMPAT_LLAMA_SWAP = "llama-swap";
 const DEFAULT_OUTPUT_LANGUAGE = "中文";
 const OUTPUT_LANGUAGE_ZH = "中文";
 const CHARACTER_DETAIL_NORMAL = "一般";
@@ -26,10 +30,10 @@ const STATUS_COLORS = {
     error: "#f87171",
 };
 
-function coerceLlmUrl(value) {
+function coerceLlmUrl(value, defaultUrl = DEFAULT_LLM_URL) {
     const s = String(value ?? "").trim();
     if (/^https?:\/\//i.test(s)) return s.replace(/\/+$/, "");
-    return DEFAULT_LLM_URL;
+    return defaultUrl;
 }
 
 function coerceLlmModel(value) {
@@ -39,14 +43,14 @@ function coerceLlmModel(value) {
 }
 
 function normalizeApiFormat(fmt) {
-    if (fmt === LEGACY_OPENAI_FORMAT) return API_OLLAMA;
-    if (fmt === API_ZHIPU || fmt === API_OLLAMA) return fmt;
+    if (fmt === LEGACY_OPENAI_FORMAT) return API_OPENAI_COMPAT;
+    if (fmt === API_ZHIPU || fmt === API_OLLAMA || fmt === API_OPENAI_COMPAT) return fmt;
     return DEFAULT_API_FORMAT;
 }
 
 function inferApiFormat(url, explicit) {
     const fmt = normalizeApiFormat(explicit);
-    if (fmt === API_ZHIPU || fmt === API_OLLAMA) return fmt;
+    if (fmt === API_ZHIPU || fmt === API_OLLAMA || fmt === API_OPENAI_COMPAT) return fmt;
     const u = coerceLlmUrl(url);
     if (/bigmodel\.cn/i.test(u)) return API_ZHIPU;
     return DEFAULT_API_FORMAT;
@@ -54,7 +58,14 @@ function inferApiFormat(url, explicit) {
 
 function defaultsForApiFormat(fmt) {
     if (fmt === API_ZHIPU) return { url: DEFAULT_ZHIPU_URL, model: DEFAULT_ZHIPU_MODEL };
+    if (fmt === API_OPENAI_COMPAT) return { url: DEFAULT_OPENAI_COMPAT_URL, model: DEFAULT_LLM_MODEL };
     return { url: "http://127.0.0.1:11434", model: DEFAULT_LLM_MODEL };
+}
+
+function normalizeOpenAiCompatMode(mode) {
+    return String(mode || "").trim().toLowerCase() === OPENAI_COMPAT_LLAMA_SWAP
+        ? OPENAI_COMPAT_LLAMA_SWAP
+        : OPENAI_COMPAT_STANDARD;
 }
 
 function ensurePeStyles() {
@@ -198,6 +209,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     for (const [val, label] of [
         [API_OLLAMA, "Ollama (/api/chat)"],
         [API_ZHIPU, "智谱 GLM (/paas/v4/chat)"],
+        [API_OPENAI_COMPAT, "OpenAI Compatible (/v1/chat/completions)"],
     ]) {
         const o = document.createElement("option");
         o.value = val; o.textContent = label;
@@ -219,6 +231,30 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     fmtRow.appendChild(pe.visionBadge);
     pe.body.appendChild(fmtRow);
 
+    const compatRow = el({ display: "none", gap: "6px", alignItems: "center" });
+    compatRow.appendChild(el({ fontSize: "10px", color: "#b8c0d0", flexShrink: "0" }, "OpenAI 特性:"));
+    pe.compatSelect = document.createElement("select");
+    Object.assign(pe.compatSelect.style, {
+        flex: "1", fontSize: "10px", background: "#12151b", color: "#e8ecf4",
+        border: "1px solid #2a3140", borderRadius: "3px",
+    });
+    for (const [val, label] of [
+        [OPENAI_COMPAT_STANDARD, "标准"],
+        [OPENAI_COMPAT_LLAMA_SWAP, "llama-swap"],
+    ]) {
+        const o = document.createElement("option");
+        o.value = val; o.textContent = label;
+        pe.compatSelect.appendChild(o);
+    }
+    pe.compatSelect.title = "仅 OpenAI Compatible 生效。选择 llama-swap 后启用 /api/models/unload/{model_id} 卸载接口。";
+    pe.compatSelect.onchange = () => {
+        pe.updateApiFormatUI();
+        pe.syncToWidgets();
+    };
+    compatRow.appendChild(pe.compatSelect);
+    pe.compatRow = compatRow;
+    pe.body.appendChild(compatRow);
+
     const urlRow = el({ display: "flex", gap: "6px" });
     pe.urlInput = document.createElement("input");
     pe.urlInput.type = "text";
@@ -226,6 +262,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     Object.assign(pe.urlInput.style, { flex: "1", fontSize: "10px", background: "#12151b", color: "#e8ecf4", border: "1px solid #2a3140", borderRadius: "3px", padding: "4px 6px" });
     pe.urlInput.oninput = () => {
         pe.apiSelect.value = inferApiFormat(pe.urlInput.value, pe.apiSelect.value);
+        pe.updateApiFormatUI();
         pe.syncToWidgets();
     };
     swallowKeys(pe.urlInput);
@@ -330,7 +367,8 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.unloadCheck = document.createElement("input"); pe.unloadCheck.type = "checkbox";
     pe.unloadCheck.onchange = () => pe.syncToWidgets();
     pe.unloadWrap.appendChild(pe.unloadCheck);
-    pe.unloadWrap.appendChild(el({ fontSize: "10px", color: "#b8c0d0" }, "Unload Ollama"));
+    pe.unloadCheckLabel = el({ fontSize: "10px", color: "#b8c0d0" }, "Unload Ollama");
+    pe.unloadWrap.appendChild(pe.unloadCheckLabel);
     autoRow.appendChild(pe.unloadWrap);
     pe.body.appendChild(autoRow);
 
@@ -380,22 +418,42 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
 
     pe.widget = (name) => editor.widget(name);
 
+    pe.supportsUnload = () => {
+        const fmt = pe.apiSelect.value;
+        return fmt === API_OLLAMA
+            || (fmt === API_OPENAI_COMPAT && normalizeOpenAiCompatMode(pe.compatSelect?.value) === OPENAI_COMPAT_LLAMA_SWAP);
+    };
+
     pe.updateApiFormatUI = () => {
         const fmt = pe.apiSelect.value;
-        const needKey = fmt === API_ZHIPU;
-        if (pe.keyRow) pe.keyRow.style.display = needKey ? "flex" : "none";
-        if (pe.unloadWrap) pe.unloadWrap.style.display = fmt === API_OLLAMA ? "flex" : "none";
-        if (pe.unloadBtnRow) pe.unloadBtnRow.style.display = fmt === API_OLLAMA ? "flex" : "none";
+        const isOpenAi = fmt === API_OPENAI_COMPAT;
+        const showKey = fmt === API_ZHIPU || isOpenAi;
+        const supportsUnload = pe.supportsUnload();
+        if (pe.compatRow) pe.compatRow.style.display = isOpenAi ? "flex" : "none";
+        if (pe.keyRow) pe.keyRow.style.display = showKey ? "flex" : "none";
+        if (pe.apiKeyInput) {
+            pe.apiKeyInput.placeholder = fmt === API_ZHIPU ? "智谱 API Key" : "OpenAI / llama-swap API Key（可选）";
+        }
+        if (pe.unloadWrap) pe.unloadWrap.style.display = supportsUnload ? "flex" : "none";
+        if (pe.unloadBtnRow) pe.unloadBtnRow.style.display = supportsUnload ? "flex" : "none";
+        const unloadText = fmt === API_OLLAMA ? "Unload Ollama" : "Unload Model (llama-swap)";
+        if (pe.unloadCheckLabel) pe.unloadCheckLabel.textContent = unloadText;
+        if (pe.unloadBtn) pe.unloadBtn.textContent = unloadText;
         pe.urlInput.placeholder = defaultsForApiFormat(fmt).url;
         pe.modelInput.placeholder = defaultsForApiFormat(fmt).model;
     };
 
     pe.syncFromWidgets = () => {
         const w = (n) => pe.widget(n);
-        const url = coerceLlmUrl(w("llm_url")?.value);
+        const explicitFmt = w("llm_api_format")?.value || DEFAULT_API_FORMAT;
+        const fmt = inferApiFormat(w("llm_url")?.value, explicitFmt);
+        const url = coerceLlmUrl(w("llm_url")?.value, defaultsForApiFormat(fmt).url);
         pe.urlInput.value = url;
-        pe.apiSelect.value = inferApiFormat(url, w("llm_api_format")?.value || DEFAULT_API_FORMAT);
+        pe.apiSelect.value = fmt;
         pe._lastApiFormat = pe.apiSelect.value;
+        if (pe.compatSelect) {
+            pe.compatSelect.value = normalizeOpenAiCompatMode(w("llm_openai_compat_mode")?.value);
+        }
         pe.modelInput.value = coerceLlmModel(w("llm_model")?.value);
         if (w("llm_api_key")) pe.apiKeyInput.value = w("llm_api_key").value || "";
         if (w("llm_auto_enhance")) pe.autoCheck.checked = !!w("llm_auto_enhance").value;
@@ -414,15 +472,16 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
 
     pe.syncToWidgets = () => {
         const set = (n, v) => { const w = pe.widget(n); if (w) w.value = v; };
-        const url = coerceLlmUrl(pe.urlInput.value);
+        const url = coerceLlmUrl(pe.urlInput.value, defaultsForApiFormat(pe.apiSelect.value).url);
         set("llm_api_format", pe.apiSelect.value);
+        set("llm_openai_compat_mode", normalizeOpenAiCompatMode(pe.compatSelect?.value));
         set("llm_url", url);
         set("llm_api_key", pe.apiKeyInput.value || "");
         set("llm_model", coerceLlmModel(pe.modelInput.value));
         set("llm_output_language", pe.langSelect.value || DEFAULT_OUTPUT_LANGUAGE);
         set("llm_character_feature_enhance", !!pe.detailCheck?.checked);
         set("llm_auto_enhance", !!pe.autoCheck.checked);
-        set("llm_unload_after", !!pe.unloadCheck.checked);
+        set("llm_unload_after", pe.supportsUnload() && !!pe.unloadCheck.checked);
         const custom = pe.templateArea.value.trim();
         set("llm_custom_template", custom !== pe._currentDefaultTemplate ? custom : "");
         editor._markNodeDirtyLight?.();
@@ -431,15 +490,18 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.fetchModels = async (silent = false) => {
         if (pe._busy) return;
         try {
-            const llmUrl = coerceLlmUrl(pe.urlInput.value);
+            const llmUrl = coerceLlmUrl(pe.urlInput.value, defaultsForApiFormat(pe.apiSelect.value).url);
             pe.urlInput.value = llmUrl;
             pe.apiSelect.value = inferApiFormat(llmUrl, pe.apiSelect.value);
+            pe.updateApiFormatUI();
             if (!silent) pe.setStatus("正在获取模型列表…", "loading");
             const resp = await api.fetchApi("/bernini/director/enhance_models", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    llm_url: llmUrl, api_format: pe.apiSelect.value, api_key: pe.apiKeyInput.value || "",
+                    llm_url: llmUrl, api_format: pe.apiSelect.value,
+                    openai_compat_mode: normalizeOpenAiCompatMode(pe.compatSelect?.value),
+                    api_key: pe.apiKeyInput.value || "",
                 }),
             });
             const data = await resp.json();
@@ -453,7 +515,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
                 o.value = name;
                 pe.modelList.appendChild(o);
             }
-            if (!pe.modelInput.value.trim()) pe.modelInput.value = DEFAULT_LLM_MODEL;
+            if (!pe.modelInput.value.trim()) pe.modelInput.value = defaultsForApiFormat(pe.apiSelect.value).model;
             pe.syncToWidgets();
             if (!silent) pe.setStatus(`${(data.models || []).length} 个模型（可手动输入名称）`, "success");
         } catch (e) {
@@ -529,9 +591,10 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             pe.detailCheck.checked = resolveCharacterFeatureEnhance(pe, { preferWidget: true });
         }
         pe.syncToWidgets();
-        const llmUrl = coerceLlmUrl(pe.urlInput.value);
+        const llmUrl = coerceLlmUrl(pe.urlInput.value, defaultsForApiFormat(pe.apiSelect.value).url);
         pe.urlInput.value = llmUrl;
         pe.apiSelect.value = inferApiFormat(llmUrl, pe.apiSelect.value);
+        pe.updateApiFormatUI();
         const model = coerceLlmModel(pe.modelInput.value);
         pe.modelInput.value = model;
         const outputLanguage = resolveOutputLanguage(pe);
@@ -539,6 +602,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         const customTemplate = pe.templateArea.value.trim() !== pe._currentDefaultTemplate ? pe.templateArea.value.trim() : "";
         return {
             llmUrl, model, apiFormat: pe.apiSelect.value,
+            openaiCompatMode: normalizeOpenAiCompatMode(pe.compatSelect?.value),
             apiKey: pe.apiKeyInput.value || "",
             outputLanguage,
             characterFeatureEnhance,
@@ -625,10 +689,11 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
                 body: JSON.stringify({
                     llm_url: cfg.llmUrl, model: cfg.model, prompt, task_type: taskKey,
                     image_num: Math.max(1, refCount), images, api_format: cfg.apiFormat,
+                    openai_compat_mode: cfg.openaiCompatMode,
                     api_key: cfg.apiKey, output_language: cfg.outputLanguage,
                     character_feature_enhance: cfg.characterFeatureEnhance,
                     source_count: sourceCount, ref_slots: refSlots, ref_video_count: refVideoCount,
-                    llm_unload_after: !!pe.unloadCheck.checked, custom_template: cfg.customTemplate,
+                    llm_unload_after: pe.supportsUnload() && !!pe.unloadCheck.checked, custom_template: cfg.customTemplate,
                 }),
         });
         let data = {};
@@ -755,20 +820,32 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         }
     };
 
-    pe.unloadOllama = async () => {
-        const llmUrl = coerceLlmUrl(pe.urlInput.value);
+    pe.unloadModel = async () => {
+        const llmUrl = coerceLlmUrl(pe.urlInput.value, defaultsForApiFormat(pe.apiSelect.value).url);
+        const apiFormat = pe.apiSelect.value;
+        const openaiCompatMode = normalizeOpenAiCompatMode(pe.compatSelect?.value);
         const model = coerceLlmModel(pe.modelInput.value);
         if (!model) { pe.setStatus("请输入模型名称", "error"); return; }
+        if (!pe.supportsUnload()) {
+            pe.setStatus("当前 API 格式不支持手动卸载模型", "error");
+            return;
+        }
         pe.setStatus("正在卸载模型…", "loading");
         try {
-            const resp = await api.fetchApi("/bernini/director/unload_ollama", {
+            const resp = await api.fetchApi("/bernini/director/unload_model", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ llm_url: llmUrl, model }),
+                body: JSON.stringify({
+                    llm_url: llmUrl,
+                    model,
+                    api_format: apiFormat,
+                    openai_compat_mode: openaiCompatMode,
+                    api_key: pe.apiKeyInput.value || "",
+                }),
             });
             const data = await resp.json();
             if (resp.ok && data.status === "unloaded") {
-                pe.setStatus("Ollama 模型已卸载", "success");
+                pe.setStatus(`${data.provider || "LLM"} 模型已卸载`, "success");
             } else {
                 pe.setStatus(data.error || "卸载失败", "error");
             }
@@ -776,6 +853,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             pe.setStatus(`卸载失败: ${e.message}`, "error");
         }
     };
+    pe.unloadOllama = pe.unloadModel;
 
     pe.onTaskTypeChanged = () => pe.fetchTemplate();
     pe.handleServerEnhanced = (payload) => {
